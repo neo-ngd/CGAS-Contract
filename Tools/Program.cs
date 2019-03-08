@@ -1,4 +1,5 @@
 ﻿using Neo;
+using Neo.Wallets;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -13,9 +14,9 @@ namespace ConsoleApp1
         static void Main(string[] args)
         {
             //address 2 script hash
-            Console.WriteLine(Neo.Wallets.Wallet.ToScriptHash("Ae8AD6Rc3cvQapqttJcUTj9ULfLi2tLHmc"));
+            Console.WriteLine("Ae8AD6Rc3cvQapqttJcUTj9ULfLi2tLHmc".ToScriptHash());
             //script hash 2 address
-            Console.WriteLine(Neo.Wallets.Wallet.ToAddress(new UInt160("0x505663a29d83663a838eee091249abd167e928f5".Remove(0, 2).HexToBytes().Reverse().ToArray())));            
+            Console.WriteLine(new UInt160("0x505663a29d83663a838eee091249abd167e928f5".Remove(0, 2).HexToBytes().Reverse().ToArray()).ToAddress());            
 
             //hex string 2 string
             Console.WriteLine("7472616e73666572".HexToString());

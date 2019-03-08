@@ -61,7 +61,7 @@ Additional methods other than NEP-5 methods used to support GAS-CGAS swap:
 | getTxInfo          | byte[] txId | [TransferInfo](NeoContract/TransferInfo.cs) | Get detailed transfer info under a TxId. TxInfo will be recorded under the following 4 instructions: mintTokens, refund, transfer, transferAPP. |
 | mintTokens         | ---         | bool                                        | A mintTokens method for CGAS users, who can transfer GAS to CGAS contract address by constructing InvocationTransaction and convert GAS to CGAS by invoking mintTokens method. Upon successful  invocation, CGAS in the equal value of the GAS will be added to the user's asset account. [NOTE](#note-en) |
 | refund             | byte[] from | bool                                        | It takes two steps to claim CGAS and convert it to GAS. First, construct an InvocationTransaction, including GAS transfer within the same CGAS address (the transfer amount should be the GAS amount users expect to get refunded) to invoke the refund method (set the parameter as the Script Hash of the refund account). Upon successful invocation, CGAS in the equal amount of the refunded GAS will be automatically destroyed and the No.0 output of the transaction will be marked with the ownership of the user. Second, the user may construct a transaction and set the UTXO marked in the first step as a transaction input and his/her account as the transaction output to get GAS from the CGAS address. |
-| supportedStandards | ---         | string                                      | NEP-10 standard for return contract; the return value is constant `{"NEP-5", "NEP-7", "NEP-10"}`. |
+| supportedStandards | ---         | string                                      | NEP-10 standard for return contract; the return value is constant ：`{ "NEP-5", "NEP-7", "NEP-10" }` |
 
 Notification defined in NEP-5 standard:
 
@@ -367,7 +367,7 @@ NEP-5 规范中的方法：
 | getTxInfo          | byte[] txId | [TransferInfo](NeoContract/TransferInfo.cs) | 获得某个交易 ID 的详细转账信息，在以下 4 种情况中可记录 TxInfo：mintTokens, Refund, transfer, transferAPP。 |
 | mintTokens         | ---         | bool                                        | CGAS 的铸币方法。用户通过发起 InvocationTransaction，将 GAS 转给 CGAS 合约地址，并且调用 mintTokens 完成 GAS 到 CGAS 的转换工作。合约调用成功后，用户资产中将会增加与兑换的 GAS 数额相等的 CGAS。[注意事项](#note-zh) |
 | refund             | byte[] from | bool                                        | 用户将 CGAS 提取，变成 GAS 总共分两步。第一步，发起一笔 InvocationTransaction 其中包含一笔从 CGAS 地址到 CGAS 地址的 GAS 转账（转账金额为用户想退回的 GAS 的数量），并调用 refund 方法（参数为退回者的 Script Hash）。合约调用成功后，将自动销毁与退回数量相等的 CGAS，并把该交易的第 0 号 output 标记为所属于该用户。第二步，用户构造一个交易将第一步标记过的 UTXO 作为交易输入，交易输出为用户自己的地址，从而将 GAS 从 CGAS 地址中取走。 |
-| supportedStandards | ---         | string                                      | NEP-10 规范，返回合约所支持的 NEP 标准，返回值为常量：`"{"NEP-5", "NEP-7", "NEP-10"}"` |
+| supportedStandards | ---         | string                                      | NEP-10 规范，返回合约所支持的 NEP 标准，返回值为常量，数组格式：`{ "NEP-5", "NEP-7", "NEP-10" }` |
 
 NEP-5 规范中的通知：
 
@@ -645,3 +645,367 @@ refund 第二步的交易结构:
 refund 第二步的 application log:
 
 refund 第二步为普通的合约交易，没有 application log.
+
+### 技术细节
+
+#### Verification 触发器部分代码
+
+这部分代码在 refund 第一步和 refund 第二步的时候执行，执行成功后交易确认，执行失败后交易不确认。
+
+执行逻辑为：
+
+获取当前交易的所有 inputs 和 outputs，分析 inputs 是否包已被标记为 refund，如果有则认为是用户在执行 refund 第二步的操作，如果没有则认为用户在执行refund 第一步的操作。
+
+refund 第二步的逻辑很简单，只能标记为 refund 的人才可以把钱取走。
+
+refund 第一步的逻辑也不复杂，进行交易后 CGAS 合约里的钱不会变少。
+
+```c#
+var tx = ExecutionEngine.ScriptContainer as Transaction;
+var inputs = tx.GetInputs();
+var outputs = tx.GetOutputs();
+```
+
+这段代码是获取智能合约调用的交易，从而获得交易输入和交易输出，为后续的判断做准备。
+
+那么如何判断 inputs 是否包已被标记为 refund 呢？
+
+```c#
+foreach (var input in inputs)
+{
+    if (input.PrevIndex == 0)//If UTXO n is 0, it is possible to be a marker UTXO
+    {
+        StorageMap refund = Storage.CurrentContext.CreateMap(nameof(refund));
+        var refundMan = refund.Get(input.PrevHash);
+        //If the input that is marked for refund
+        if (refundMan.Length > 0)
+        {
+            //Only one input and one output is allowed in refund
+            if (inputs.Length != 1 || outputs.Length != 1)
+                return false;
+            return outputs[0].ScriptHash.AsBigInteger() == refundMan.AsBigInteger();
+        }
+    }
+}
+```
+
+首先对所有交易输入进行遍历，在 refund 第一步操作的这里约定了用户进行 refund 的时候将第 0 号交易输出进行标记。所以这里对 UTXO 的 prevIndex 进行判断，如果是 0 则有可能是被标记的 UTXO，然后进行下一步判断。接下来是从存储区里读取 UTXO 的 prevHash，如果获取到值，则就是标记为 refund 的 UTXO。
+
+问：既然从存储区里读取 prevHash 是最终的判断标准，为什么还要对 prevIndex 进行判断呢？
+
+答：存储区操作会花费较多手续费，所以将判断分为两级，先进行手续费低的判断，再进行手续费高的判断。
+
+**refund 第二步的代码**
+
+当从存储区中读取到后，用户就可以将这笔钱取走，但是不能将 CGAS 中其余的钱取走，所以这里对 inputs 和 outputs 的数量进行了限制，在 refund 操作中只允许一个 input 和一个 output。
+
+```c#
+if (inputs.Length != 1 || outputs.Length != 1)
+    return false;
+return outputs[0].ScriptHash.AsBigInteger() == refundMan.AsBigInteger();
+```
+
+最后一句的意思就是只允许这个 UTXO 的所有人，也就是将它标记为 refund 的人能把钱取走。但是只允许一个 input 和一个 output 的话有一个潜在的 Bug，就是如果打算支付手续费的话，只能通过减少 outputs 的金额来支付手续费，而无法通过添加 inputs 的方式来支付手续费，也就是说用户无法通过添加一个带 GAS 的 UTXO 来作为附加手续费。
+
+如何改进呢？
+
+```c#
+var references = tx.GetReferences();
+for (int i = 1; i < references.Length; i++)
+{
+    if (references[i].ScriptHash.AsBigInteger() == currentHash.AsBigInteger())
+        return false;
+}
+return outputs[0].ScriptHash.AsBigInteger() == refundMan.AsBigInteger();
+```
+
+可能像上面的代码一样，检测 inputs 中只能有第一笔是从 CGAS 中取走的，其余的 UTXO 不能从 CGAS 取走。如上面的代码，这样就形成一个约定，要取走的 UTXO 只能作为第一个 inputs，如果用户附加的手续费作为第一个 inputs，要取走的 UTXO 作为第二个 inputs 就会失败。
+
+当然也可以进行下面的改进：
+
+```c#
+var references = tx.GetReferences();
+int count = 0;
+for (int i = 1; i < references.Length; i++)
+{
+    if (references[i].ScriptHash.AsBigInteger() == currentHash.AsBigInteger())
+        count++;
+}
+if(count > 1)
+    return false;
+return outputs[0].ScriptHash.AsBigInteger() == refundMan.AsBigInteger();
+```
+
+这样改后就解除了“要取走的 UTXO 只能作为第一个 inputs”这样的限制，但多加了些代码也会使手续费升高。总之需要在手续费和用户体验中找到一个平衡点。
+
+只允许一个 input 和一个 output
+
+**refund 第一步的代码**
+
+当所有的 inputs 中都没有检测到标记为 refund 的时候，就认为用户在执行 refund 第一步的操作。
+
+和第二步不同的是，refund 第一步是一个 InvocationTransaction，执行分为两步，第一步是通过 Verification 触发器执行的，允许一笔从 CGAS 地址到 CGAS 地址的转账，要求转账后 CGAS 地址的金额不能少。而且在转账的时候不能使用被标记为 refund 的 UTXO。第二步是通过 Application 触发器执行的，这是在交易确认之后，才执行，这里先讲 Verification 触发器部分。
+
+```c#
+var currentHash = ExecutionEngine.ExecutingScriptHash;
+
+BigInteger inputAmount = 0;
+foreach (var refe in tx.GetReferences())
+{
+    if (refe.AssetId.AsBigInteger() != AssetId.AsBigInteger())
+        return false;
+    if (refe.ScriptHash.AsBigInteger() == currentHash.AsBigInteger())
+        inputAmount += refe.Value;
+}
+
+BigInteger outputAmount = 0;
+foreach (var output in outputs)
+{
+    if (output.ScriptHash.AsBigInteger() == currentHash.AsBigInteger())
+        outputAmount += output.Value;
+}
+
+return outputAmount == inputAmount;
+```
+
+代码逻辑也很简单，首先不允许 inputs 中包含非 GAS 资产，然后对来自 CGAS 地址的 inputs 进行求和，再对转到 CGAS 地址的 outputs 进行求和，比较输入总和和输出总和是否相等。
+
+这段代码在 CGAS 中是可以附加手续费的，但是到 CNEO 的话，由于限制了不能包含非 NEO 资产，所以无法附加手续费，这是已经的 Bug，但目前影响不大。如何改进呢？
+
+```c#
+BigInteger inputAmount = 0;
+foreach (var refe in tx.GetReferences())
+{
+    if (refe.AssetId.AsBigInteger() == AssetId.AsBigInteger() && refe.ScriptHash.AsBigInteger() == currentHash.AsBigInteger())
+        inputAmount += refe.Value;
+}
+
+BigInteger outputAmount = 0;
+foreach (var output in outputs)
+{
+    if (output.AssetId.AsBigInteger() == AssetId.AsBigInteger() && output.ScriptHash.AsBigInteger() == currentHash.AsBigInteger())
+        outputAmount += output.Value;
+}
+return outputAmount == inputAmount;
+```
+
+如上面的代码，首先去掉了不允许包含其它资产的限制，然后进行判断：交易输入中的来自合约地址的指定的资产的数量和交易输出中的转到合约地址的指定的资产的数量相等。这样就可以避免合约中指定资产的流失。
+
+在判断中不仅要判断资产数量，还要判断资产种类，否则就有可能发生以下的攻击：
+
+```
+交易输入                      交易输出
+
+CGAS  100 GAS                CGAS  100 Token1
+User1 100 Token1             User1 100 GAS  
+```
+
+其中 User1 是用户的地址，Token1 是其它某个不值钱的全局资产。
+
+智能合约的安全性不亚于金融软件的安全性，在编写时需要考虑得很全面，才能避免出现漏洞。
+
+#### Application 触发器部分代码
+
+这块就很简单了，就是标准的智能合约的格式，通过 method 的不同来执行不同的方法。
+
+```c#
+if (Runtime.Trigger == TriggerType.Application)
+{
+    var callscript = ExecutionEngine.CallingScriptHash;
+
+    if (method == "balanceOf") return BalanceOf((byte[])args[0]);
+
+    if (method == "decimals") return Decimals();
+
+    if (method == "getRefundTarget") return GetRefundTarget((byte[])args[0]);
+
+    if (method == "getTxInfo") return GetTxInfo((byte[])args[0]);
+
+    if (method == "mintTokens") return MintTokens();
+
+    if (method == "name") return Name();
+
+    if (method == "refund") return Refund((byte[])args[0]);
+
+    if (method == "symbol") return Symbol();
+
+    if (method == "supportedStandards") return SupportedStandards();
+
+    if (method == "totalSupply") return TotalSupply();
+
+    if (method == "transfer") return Transfer((byte[])args[0], (byte[])args[1], (BigInteger)args[2], callscript);
+}
+```
+
+需要注意的是，ExecutionEngine.CallingScriptHash 该方法的意思是获取合约调用链的上一级，也就是调用 CGAS 的合约，该方法需要在一开始执行，如果是在 Transfer 方法里面执行，获取的值可能不是调用链上一级的 ScriptHash。
+
+#### VerificationR 触发器部分代码
+
+```c#
+if (Runtime.Trigger == TriggerType.VerificationR) //Backward compatibility, refusing to accept other assets
+{
+    var currentHash = ExecutionEngine.ExecutingScriptHash;
+    var tx = ExecutionEngine.ScriptContainer as Transaction;
+    foreach (var output in tx.GetOutputs())
+    {
+        if (output.ScriptHash == currentHash && output.AssetId.AsBigInteger() != AssetId.AsBigInteger())
+            return false;
+    }
+    return true;
+}
+```
+
+这个触发器目前还没有实现，是对 NEP-7 的向后兼容，如果节点支持 NEP-7，它在 CGAS 收到转账的时候会进行验证，返回 false 代表拒绝接收这笔转账，返回 true 代表接收这笔转账。在什么情况下拒绝接受转账呢？就是用户转了一些奇奇怪怪的资产，因为用户如果误转了其它资产到 CGAS 地址，他是无法将其取出的，所以这段代码就是加以限制。但目前主网上还不支持 NEP-7，所以暂时不起作用。
+
+#### MintTokens 部分代码
+
+```c#
+var tx = ExecutionEngine.ScriptContainer as Transaction;
+byte[] sender = null;
+var inputs = tx.GetReferences();
+foreach (var input in inputs)
+{
+    if (input.AssetId.AsBigInteger() == AssetId.AsBigInteger())
+        sender = sender ?? input.ScriptHash;
+    if (input.ScriptHash.AsBigInteger() == ExecutionEngine.ExecutingScriptHash.AsBigInteger())
+        return false;
+}
+```
+
+这几行代码的作用是获取发起 MintTokens 的人，也就是投资者。但要求投资者不能是 CGAS 本身，否则就可以利用此漏洞进行攻击。
+
+```c#
+if (GetTxInfo(tx.Hash) != null)
+    return false;
+```
+
+接下来这句也是防止黑客攻击的，和 MintTokens 结尾这一段代码配合使用。
+
+```c#
+SetTxInfo(null, sender, value);
+```
+
+因为正常来讲一笔 Invocation 交易会执行一遍 Main 方法，从 NEO-GUI 里调用的也是这样，但如果黑客手动构造了一笔交易，让其执行多次 Main 方法，然后都调用了 MintTokens，就会导致一笔投资，进行多次铸币操作。通过这样的方法可以避免这类攻击。在一次 MintTokens 方法执行结束后， 将交易 ID 写在存储区里，每次执行 MintTokens 的时候，如果发现存储区里有该交易 ID，则返回 False，将其认为非法的 MintTokens 操作。
+
+```c#
+var outputs = tx.GetOutputs();
+ulong value = 0;
+foreach (var output in outputs)
+{
+    if (output.ScriptHash == ExecutionEngine.ExecutingScriptHash &&
+        output.AssetId.AsBigInteger() == AssetId.AsBigInteger())
+    {
+        value += (ulong)output.Value;
+    }
+}
+```
+
+接下来的代码是进行计算用户向 CGAS 合约转账了多少 GAS，这里对所有交易输出进行了遍历，如果转的地址是 CGAS 地址，并且转的资产是 GAS，则进行统计。
+
+获取了用户总共向 CGAS 合约转了多少 GAS 之后，就要做两件事件:
+
+１、修改 CGAS 的总量
+
+```c#
+StorageMap contract = Storage.CurrentContext.CreateMap(nameof(contract));
+var totalSupply = contract.Get("totalSupply").AsBigInteger(); 
+totalSupply += value;
+contract.Put("totalSupply", totalSupply);
+```
+
+２、给用户分按兑换比例发 CGAS
+
+```c#
+StorageMap asset = Storage.CurrentContext.CreateMap(nameof(asset));
+var amount = asset.Get(sender).AsBigInteger();
+asset.Put(sender, amount + value);
+```
+
+最后触发转账的事件，通知客户端无中生有地给一个用户进行了转账，也就是分发资产。
+
+```c#
+Transferred(null, sender, value);
+```
+
+Transferred 的参数有 3 个，分别是 转账人、收款人、转账金额。在 MintTokens 中，转账人为 null，在 refund 第一步，收款人为 null。
+
+用户如果想在 MintTokens 的时候附加一些手续费，也是可以的，代码中只检测转给 CGAS 合约的交易输出中的 GAS 部分，用户交易输入中包含的 GAS，以及找零的 GAS 程序是不进行统计的。
+
+#### Refund 部分代码
+
+回顾一下方法说明中的介绍：用户将 CGAS 提取，变成 GAS 总共分两步。第一步，发起一笔 InvocationTransaction 其中包含一笔从 CGAS 地址到 CGAS 地址的 GAS 转账（转账金额为用户想退回的 GAS 的数量），并调用 refund 方法（参数为退回者的 Script Hash）。合约调用成功后，将自动销毁与退回数量相等的 CGAS，并把该交易的第 0 号 output 标记为所属于该用户。第二步，用户构造一个交易将第一步标记过的 UTXO 作为交易输入，交易输出为用户自己的地址，从而将 GAS 从 CGAS 地址中取走。
+
+那么 refund 方法这一部分的代码对应上面的哪一步呢？
+
+显然，refund 是在 Main 方法中的 Application 触发器中调用的，所以只有 InvocationTransaction 才可能触发该方法。对应的就是第一步中的交易成功后，执行 refund 方法这一步。
+
+在代码中，有两段代码共同配合完成 Refund 的第一步的操作，一段就是上文所说的 Verification 触发器部分代码，第二段就是 refund 方法这一部分的代码。
+
+这段代码是在 InvocationTransaction 验证成功后，才执行的。
+
+```c#
+if (from.Length != 20)
+    throw new InvalidOperationException("The parameter from SHOULD be 20-byte addresses.");
+```
+
+首先是对参数进行验证，这符合 NEP-5 规范。在转账的过程一直是从 CGAS 合约地址转到 CGAS 合约地址，不存在用户的地址，所以为了获得用户的地址，需要把用户的地址作为参数传进来。
+
+```c#
+var tx = ExecutionEngine.ScriptContainer as Transaction;
+var preRefund = tx.GetOutputs()[0];
+if (preRefund.AssetId.AsBigInteger() != AssetId.AsBigInteger()) return false;
+```
+
+然后验证了 Refund 的资产是否符合要求。
+
+```c#
+if (preRefund.ScriptHash.AsBigInteger() != ExecutionEngine.ExecutingScriptHash.AsBigInteger()) return false;
+```
+
+接下来我们打算把 index 为 0 的交易输出标记为 refund，所以先验证一下这个交易输出是否转到的是 CGAS 地址，而不是其它的地址。
+
+```c#
+StorageMap refund = Storage.CurrentContext.CreateMap(nameof(refund));
+if (refund.Get(tx.Hash).Length > 0) return false; 
+……
+refund.Put(tx.Hash, from);
+```
+
+这一步是预防性编程，防止同一个 UTXO 被多次 refund，如果发生会让用户损失资产。
+
+```c#
+if (!Runtime.CheckWitness(from)) return false;
+```
+
+最后一步验证就是验证签名，这是进行权限验证的常用手段，如果黑客想 refund 其它人的资产，我把 from 填写为其它人的地址，到这一步验证签名就会失败。
+
+```c#
+StorageMap asset = Storage.CurrentContext.CreateMap(nameof(asset));
+var fromAmount = asset.Get(from).AsBigInteger(); 
+var preRefundValue = preRefund.Value;
+if (fromAmount < preRefundValue)
+    return false;
+else if (fromAmount == preRefundValue)
+    asset.Delete(from); 
+else
+    asset.Put(from, fromAmount - preRefundValue); 
+```
+
+验证好身份之后，就要对用户资产进行操作了。这里做的事情就是将用户的资产减少，为了避免产生负数，先对 refund 的金额和用户的余额进行了比较。然后修改用户资产。
+
+有用户的资产减少了，那么 CGAS 的总量也会减少，所以还要对 totalSupply 进行修改，代码如下：
+
+```c#
+StorageMap contract = Storage.CurrentContext.CreateMap(nameof(contract));
+var totalSupply = contract.Get("totalSupply").AsBigInteger(); 
+totalSupply -= preRefundValue;
+contract.Put("totalSupply", totalSupply);
+```
+
+```c#
+SetTxInfo(from, null, preRefundValue);
+Transferred(from, null, preRefundValue);
+Refunded(tx.Hash, from);
+```
+
+最后记录下交易 ID，方便查询，触发 Transferrd 事件，方便区块链浏览器和客户端处理。然后记下这个 UTXO 是谁退回的，为 refund 第二步做准备。
