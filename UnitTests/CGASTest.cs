@@ -171,7 +171,7 @@ namespace UnitTests
             {
                 AssetId = Blockchain.UtilityToken.Hash, //Asset Id, this is GAS
                 ScriptHash = User,
-                Value = new Fixed8((long)(1 * (long)Math.Pow(10, 8)))
+                Value = Fixed8.Parse("1.0")
             }}.ToArray();
 
             Transaction tx = null;
